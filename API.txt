@@ -1,133 +1,92 @@
-PANEL_TO_LLM: 8000
-PANEL_TO_TTS: 8001
-PANEL_TO_UNITY: 8002
-PANEL_FROM_LLM: 8003
-PANEL_FROM_ASR: 8004
-PANEL_FROM_CHAT: 8005
+LLM逻辑：
+有4个状态：
+ - 待机：什么都不做
+ - 生成：根据已有的信息生成句子，进行断句后发送
+ - 等待TTS：生成完毕后等待直到生成语音完毕
+ - 等待ASR：有语音输入但还没有识别完毕时等待识别完毕
+启动时处于待机状态
+状态逻辑：
+待机状态：
+ - 若处于待机状态时间大于5s，切换到生成状态
+ - 若收到ASR给出的语音活动信号，切换到等待ASR状态
+生成状态：
+ - 生成一段回复完毕后切换到等待TTS状态
+ - 若收到ASR给出的语音活动信号，切换到等待ASR状态
+ - 从生成状态切换到其他状态时发出一个<eos>信号
+等待TTS状态：
+ - 若收到TTS给出的生成完毕信号，切换到待机状态
+等待ASR状态：
+ - 若收到ASR给出的语音识别信息，切换到生成状态
 
-LLM：
-从llm:LLM_FROM_PANEL【主动连接】panel:PANEL_TO_LLM端口：
-【接受】来自语音识别模块的文本
-示例：
+TTS逻辑：
+有2个状态：
+ - 待机：什么都不做
+ - 生成：根据收到的信息生成语音和对齐信息并播放
+启动时处于待机状态
+状态逻辑：
+待机状态：
+ - 若收到LLM给出的生成句子，切换到生成状态
+生成状态：
+ - 不断接受LLM给出的生成句子并加入队列
+ - 若收到ASR给出的语音活动信号，切换到待机状态，清空队列，并发出生成完毕信号
+ - 若生成完一个句子（或是流式生成的一个chunk），发出其对应的对齐信息并播放这个段落，播放完则发出下一个对齐信息并播放下一个段落
+ - 若将LLM给出的所有句子都生成播放完毕（即队列中的下一个是<eos>），切换到待机状态，并发出生成完毕信号
+
+ASR逻辑：
+有2个状态：
+ - 待机：什么都不做
+ - 转录：进行语音识别
+状态逻辑：
+待机状态：
+ - 若VAD模型检测到语音活动，发出语音活动信号，并切换到转录状态
+转录状态：
+ - 若识别完毕则发出识别的文本，并切换到待机状态
+
+语音活动信号示例：
 {
-    "from": "ASR",
-    "name": "Developer A",
-    "text": "这是来自开发者A的语音识别结果"
-}
-【接受】来自直播聊天区的文本
-示例：
+    "from": "asr",
+    "type": "signal",
+    "payload": "activate"
+}%SEP%
+ASR识别文本示例：
 {
-    "from": "Chat",
-    "list": [
-        {
-            "name": "Audience A",
-            "text": "这是来自观众A的直播聊天内容"
-        },
-        {
-            "name": "Audience B",
-            "text": "这是来自观众B的直播聊天内容"
-        }
-    ]
-}
-从llm:LLM_TO_PANEL【主动连接】panel:PANEL_FROM_LLM端口：
-【发出】生成文本token和情感对应概率
-示例：
-{
-    "from": "LLM",
-    "token": "A", # 只发送最新生成的token
-    "feelings": {
-        "positive": 0.8, # 具体的情感分类待定
-        "negative": 0.2
+    "from": "asr",
+    "type": "data",
+    "payload": {
+        "user": "Developer A",
+        "content": "this is an asr test."
     }
-}
-当token为<eos>时，表示模型已经生成完毕。
-
-ASR：
-从asr:ASR_TO_PANEL【主动连接】panel:PANEL_FROM_ASR端口：
-【发出】识别的文本信息
-示例：
+}%SEP%
+LLM<eos>信号示例：
 {
-    "from": "ASR",
-    "name": "Developer A",
-    "text": "这是来自开发者A的语音识别结果"
+    "from": "llm",
+    "type": "signal",
+    "payload": "eos"
 }
-
-TTS：
-从tts:TTS_FROM_PANEL【主动连接】panel:PANEL_TO_TTS端口：
-【接受】模型生成的文本
-示例：
+LLM生成文本示例：
 {
-    "from": "LLM",
-    "token": "A",
-    "feelings": {
-        "positive": 0.8,
-        "negative": 0.2
+    "from": "llm",
+    "type": "data",
+    "payload": {
+        "content": "this is an llm test.",
+        "id": <此处为生成完成时的时间戳>
     }
-}
-此处会要求TTS支持流式合成，也可以选择缓存token直至收到<eos>
-
-前端【Unity】：
-从unity:UNITY_FROM_PANEL【主动连接】panel:PANEL_TO_UNITY端口：
-【接受】来自模型的文本
-示例：
+}%SEP%
+TTS生成完毕信号示例：
 {
-    "from": "LLM",
-    "tokens": "A",
-    "feelings": {
-        "positive": 0.8,
-        "negative": 0.2
+    "from": "tts",
+    "type": "signal",
+    "payload": "finish"
+}%SEP%
+TTS对齐信息示例：
+{
+    "from": "tts",
+    "type": "data",
+    "payload": {
+        "id": <对应的句子的id>,
+        "index": <所对应的文段末尾在原句子中的索引>,
+        "duration": <这一段音频的长度>
     }
-}
-【接受】来自语音识别模块的文本
-示例：
-{
-    "from": "ASR",
-    "name": "Developer A",
-    "text": "这是来自开发者A的语音识别结果"
-}
-【接受】来自直播聊天区的文本
-示例：
-{
-    "from": "Chat",
-    "list": [
-        {
-            "name": "Audience A",
-            "text": "这是来自观众A的直播聊天内容"
-        },
-        {
-            "name": "Audience B",
-            "text": "这是来自观众B的直播聊天内容"
-        }
-    ]
-}
+}%SEP%
 
-直播间模块：
-从chat:CHAT_TO_PANEL【主动连接】panel:PANEL_FROM_CHAT端口：
-【发出】直播间聊天内容
-示例：
-{
-    "from": "Chat",
-    "list": [
-        {
-            "name": "Audience A",
-            "text": "这是来自观众A的直播聊天内容"
-        },
-        {
-            "name": "Audience B",
-            "text": "这是来自观众B的直播聊天内容"
-        }
-    ]
-}
-
-Panel（核心）模块：
-【监听】panel:PANEL_FROM_ASR端口：【接受】来自语音识别模块的文本
-==>【转发】到llm:LLM_FROM_PANEL端口
-==>【转发】到unity:UNITY_FROM_PANEL端口
-【监听】panel:PANEL_FROM_CHAT端口：【接受】来自直播聊天区的文本
-==>【转发】到llm:LLM_FROM_PANEL端口
-==>【转发】到unity:UNITY_FROM_PANEL端口
-【监听】panel:LLM_TOKEN_OUT端口：【接受】来自模型的文本
-==>【转发】到unity:UNITY_FROM_PANEL端口
-==>【转发】到tts:TTS_FROM_PANEL端口
-
-如果数据的"from"字段为"stop"应该断开连接。
+%SEP%用于分割不同数据包，当接收方没有及时接收导致数据包堆积时可以用%SEP%将数据包分割开分别处理
