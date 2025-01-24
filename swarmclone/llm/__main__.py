@@ -36,8 +36,8 @@ def append_history(history: list[tuple[str, str]], role: str, text: str) -> list
         history[-1] = (history[-1][0], text)
     return history
 
-def split_text(text: str, separators: list[str]) -> list[str]:
-    return [part for part in re.split("|".join(separators), text) if part.strip()]
+def split_text(text: str) -> list[str]:
+    return [part for part in re.split(r"\.|\?|!|。|？|！|…", text) if part.strip()]
 
 q_recv: queue.Queue[RequestType] = queue.Queue()
 def recv_msg(sock: socket.socket, q: queue.Queue[RequestType], stop_module: threading.Event):
@@ -126,6 +126,17 @@ if __name__ == '__main__':
         t_send.start()
         generation_thread: threading.Thread | None = None # 在没有生成任务前没有值
 
+        q_send.put(MODULE_READY) # 就绪
+
+        while True: # 等待启动
+            try:
+                message: RequestType | None = q_recv.get(False)
+            except queue.Empty:
+                message = None
+            if message is not None and message == PANEL_START:
+                break
+            time.sleep(0.1) # 防止CPU占用过高
+
         history: list[tuple[str, str]] = []
         state: States = States.STANDBY
         text = "" # 尚未发送的文本
@@ -146,7 +157,7 @@ if __name__ == '__main__':
             - 若收到ASR给出的语音识别信息，切换到生成状态
             """
             try:
-                message: RequestType | None = q_recv.get(False)
+                message = q_recv.get(False)
             except queue.Empty:
                 message = None
             match state:
@@ -222,7 +233,7 @@ if __name__ == '__main__':
                         text = ""
                         full_text = ""
                         continue
-                    *sentences, text = split_text(text, ['.', '!', '?', '。', '？', '！', '…', '\n', '\r']) # 将所有完整的句子发送
+                    *sentences, text = split_text(text) # 将所有完整的句子发送
                     for i, sentence in enumerate(sentences):
                         q_send.put({
                             'from': 'llm',
@@ -262,9 +273,13 @@ if __name__ == '__main__':
                         state = States.STANDBY
                         standby_time = time.time()
                         continue
-            if message is not None and message['type'] == 'signal' and message['payload'] == 'exit':
+                    if message == ASR_ACTIVATE:
+                        state = States.WAIT_FOR_ASR
+                        continue
+            if message is not None and message == PANEL_STOP:
                 stop_generation.set()
                 stop_module.set()
+                break
         t_recv.join()
         t_send.join()
         if generation_thread is not None and generation_thread.is_alive():

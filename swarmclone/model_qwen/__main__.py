@@ -34,6 +34,7 @@ def recv_msg(sock: socket.socket, q: queue.Queue[RequestType], stop_module: thre
             break
         messages = loads(data.decode())
         for message in messages:
+            print(" * [Received]: ", message)
             q.put(message)
 
 q_send: queue.Queue[RequestType] = queue.Queue()
@@ -41,6 +42,7 @@ def send_msg(sock: socket.socket, q: queue.Queue[RequestType], stop_module: thre
     while True:
         message = q.get()
         data = dumps([message]).encode()
+        print(" * [Sent]:", data)
         sock.sendall(data)
 
 def generate(model: AutoModelForCausalLM, text_inputs: list[dict[str, str]], streamer: TextIteratorStreamer):
@@ -100,6 +102,17 @@ if __name__ == '__main__':
         t_send.start()
         generation_thread: threading.Thread | None = None # 在没有生成任务前没有值
 
+        q_send.put(MODULE_READY) # 就绪
+
+        while True: # 等待启动
+            try:
+                message: RequestType | None = q_recv.get(False)
+            except queue.Empty:
+                message = None
+            if message is not None and message == PANEL_START:
+                break
+            time.sleep(0.1) # 防止CPU占用过高
+
         history: list[dict[str, str]] = []
         state: States = States.STANDBY
         text = "" # 尚未发送的文本
@@ -120,12 +133,13 @@ if __name__ == '__main__':
             - 若收到ASR给出的语音识别信息，切换到生成状态
             """
             try:
-                message: RequestType | None = q_recv.get(False)
+                message = q_recv.get(False)
             except queue.Empty:
                 message = None
             match state:
                 case States.STANDBY:
-                    if time.time() - standby_time > 5:
+                    print(" * STANDBY")
+                    if time.time() - standby_time > 15:
                         stop_generation.clear()
                         history.append({'role': 'user', 'content': '请随便说点什么吧！'})
                         kwargs = {"model": model, "text_inputs": history, "streamer": streamer}
@@ -139,6 +153,7 @@ if __name__ == '__main__':
                         continue
 
                 case States.GENERATE:
+                    print(" * GENERATE")
                     try:
                         text += next(streamer)
                     except StopIteration: # 生成完毕
@@ -192,6 +207,7 @@ if __name__ == '__main__':
                     continue
 
                 case States.WAIT_FOR_ASR:
+                    print(" * WAIT_FOR_ASR")
                     if     (message is not None and
                             message['from'] == 'asr' and
                             message['type'] == 'data' and
@@ -207,13 +223,18 @@ if __name__ == '__main__':
                         continue
 
                 case States.WAIT_FOR_TTS:
+                    print(" * WAIT_FOR_TTS")
                     if message == TTS_FINISH:
                         state = States.STANDBY
                         standby_time = time.time()
                         continue
-            if message is not None and message['type'] == 'signal' and message['payload'] == 'exit':
+                    if message == ASR_ACTIVATE:
+                        state = States.WAIT_FOR_ASR
+                        continue
+            if message is not None and message == PANEL_STOP:
                 stop_generation.set()
                 stop_module.set()
+                break
         t_recv.join()
         t_send.join()
         if generation_thread is not None and generation_thread.is_alive():
