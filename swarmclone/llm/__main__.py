@@ -79,8 +79,9 @@ def generate(model: LLM, tokenizer: Tokenizer, model_config: dict,
             text_inputs: list[tuple[str, str]], q: queue.Queue[str], stop_generation: threading.Event):
     with torch.no_grad():
         n_blank_lines = 0
+        print(text_inputs)
+        input_ids = build_context(text_inputs, tokenizer, model_config['max_length']).to(config.DEVICE)
         while not stop_generation.is_set():
-            input_ids = build_context(text_inputs, tokenizer, model_config['max_length'])
             output = model(input_ids)
             logits = F.softmax(output[0][-1] / model_config['temperature'], dim=-1)
             probs, indices = logits.topk(round(tokenizer.get_vocab_size() * model_config['top_p']))
@@ -88,14 +89,15 @@ def generate(model: LLM, tokenizer: Tokenizer, model_config: dict,
             token_id = indices[sample]
             input_ids = torch.cat([input_ids, token_id.unsqueeze(0)], dim=-1)[:, -model_config['max_length']:]
             token = tokenizer.id_to_token(token_id.item())
+            print(token)
             if token == "\n":
                 n_blank_lines += 1
                 if n_blank_lines >= 3:
-                    q_generate.put("<eos>")
+                    q.put("<eos>")
                     break
             else:
                 n_blank_lines = 0
-                q_generate.put(token)
+                q.put(token)
 
 
 # 状态
@@ -232,7 +234,7 @@ if __name__ == '__main__':
                             })
                         full_text += text
                         # 将这轮的生成文本加入历史记录
-                        history = append_history(history, "ai", full_text)
+                        history = append_history(history, "ai", full_text.strip())
                         # 发送信号并等待TTS
                         state = States.WAIT_FOR_TTS
                         q_send.put(LLM_EOS)
@@ -251,7 +253,7 @@ if __name__ == '__main__':
                         # 处理剩余的文本，被打断时的文本直接加入历史记录不需要发出
                         full_text += text
                         # 将这轮的生成文本加入历史记录
-                        history = append_history(history, "ai", full_text)
+                        history = append_history(history, "ai", full_text.strip())
                         # 发送信号并等待ASR
                         state = States.WAIT_FOR_ASR
                         q_send.put(LLM_EOS)
@@ -277,7 +279,7 @@ if __name__ == '__main__':
                             isinstance(message['payload'], dict) and
                             isinstance(message['payload']['content'], str)):
                         stop_generation.clear()
-                        history = append_history(history, "ai", message['payload']['content'])
+                        history = append_history(history, "human", message['payload']['content'])
                         kwargs = {
                             'model': model,
                             'tokenizer': tokenizer,
